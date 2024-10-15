@@ -83,7 +83,7 @@ async fn download_backwards(
 
             OffsetRange::new(10, new_seed).next().unwrap_or(1)
         } else {
-            // For segments < 5000, try them one by one
+            // For segments < 5000, always move backward by 1
             1
         };
 
@@ -131,17 +131,21 @@ async fn download_backwards(
                     .unwrap()
                     .entry(x)
                     .or_insert(0) += 1;
-                continue 'outer;
             }
             Err(e) => {
                 if let Some(e) = e.downcast_ref::<IgLiveError>() {
                     match e {
                         // 404 segment number does not exist
-                        IgLiveError::StatusNotFound => continue,
+                        IgLiveError::StatusNotFound => {
+                            // If segment not found, continue to the next iteration
+                            // This ensures we keep moving backward even if a segment is missing
+                            latest_t = t;
+                        }
                         // Other download error, skip the segment
                         _ => {
                             pb.println(format!("Download failed: {e:?}"));
-                            continue 'outer;
+                            // Continue to the next iteration, moving backward
+                            latest_t = t;
                         }
                     }
                 }
