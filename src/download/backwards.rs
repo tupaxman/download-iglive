@@ -75,75 +75,73 @@ async fn download_backwards(
             return Ok(());
         }
 
-        // Regenerate seed
-        let mut v = Vec::from_iter(deltas.clone());
-        v.sort_by(|&(_, a), &(_, b)| b.cmp(&a));
-        let new_seed: Vec<_> = v.iter().map(|(d, _)| *d).collect();
+        let x = if latest_t >= 5000 {
+            // Regenerate seed
+            let mut v = Vec::from_iter(deltas.clone());
+            v.sort_by(|&(_, a), &(_, b)| b.cmp(&a));
+            let new_seed: Vec<_> = v.iter().map(|(d, _)| *d).collect();
 
-        let mut lower_bound = 0;
+            OffsetRange::new(10, new_seed).next().unwrap_or(1)
+        } else {
+            // For segments < 5000, try them one by one
+            1
+        };
 
-        for x in OffsetRange::new(10, new_seed) {
-            let t = latest_t - x;
-            if t < lower_bound {
-                continue;
+        let t = latest_t - x;
+        if t <= 0 {
+            // If we've reached 0 and still haven't detected completion, stop trying
+            pb.finish_with_message("Reached segment 0, considering record complete");
+            return Ok(());
+        }
+
+        // Update progress bar
+        pb.set_message(format!("Downloaded segment {}, checking {}", latest_t, t));
+        pb.tick();
+
+        // Try to download segment
+        let url = rep.download_url(url_base, t)?;
+        let filename = dir.as_ref().join(
+            url.path_segments()
+                .ok_or(IgLiveError::InvalidUrl)?
+                .rev()
+                .next()
+                .ok_or(IgLiveError::InvalidUrl)?,
+        );
+        let download_result = download_file(
+            state.clone(),
+            client,
+            rep.media_type(),
+            true,
+            &url,
+            filename,
+        )
+        .await;
+        match download_result {
+            Ok(()) => {
+                // Segment exists, continue onto next segment
+                latest_t = t;
+                // Update local copy
+                *deltas.entry(x).or_insert(0) += 1;
+                // Update global copy
+                *state
+                    .lock()
+                    .await
+                    .deltas
+                    .get_mut(&media_type)
+                    .unwrap()
+                    .entry(x)
+                    .or_insert(0) += 1;
+                continue 'outer;
             }
-
-            // Update progress bar
-            pb.set_message(format!("Downloaded segment {}, checking {}", latest_t, t));
-            pb.tick();
-
-            // Try to download segment
-            let url = rep.download_url(url_base, t)?;
-            let filename = dir.as_ref().join(
-                url.path_segments()
-                    .ok_or(IgLiveError::InvalidUrl)?
-                    .rev()
-                    .next()
-                    .ok_or(IgLiveError::InvalidUrl)?,
-            );
-            let download_result = download_file(
-                state.clone(),
-                client,
-                rep.media_type(),
-                true,
-                &url,
-                filename,
-            )
-            .await;
-            match download_result {
-                Ok(()) => {
-                    // Segment exists, continue onto next segment
-                    latest_t = t;
-                    // Update local copy
-                    *deltas.entry(x).or_insert(0) += 1;
-                    // Update global copy
-                    *state
-                        .lock()
-                        .await
-                        .deltas
-                        .get_mut(&media_type)
-                        .unwrap()
-                        .entry(x)
-                        .or_insert(0) += 1;
-                    continue 'outer;
-                }
-                Err(e) => {
-                    if let Some(e) = e.downcast_ref::<IgLiveError>() {
-                        match e {
-                            // 404 segment number does not exist
-                            IgLiveError::StatusNotFound => continue,
-                            // Segment exists but its PTS is too early, adjust the lower bound and
-                            // try again
-                            IgLiveError::PtsTooEarly => {
-                                pb.println("Info: PTS too early, continuing search");
-                                lower_bound = t;
-                                continue;
-                            }
-                            // Other download error, skip the segment
-                            _ => {
-                                pb.println(format!("Download failed: {e:?}"));
-                                continue 'outer;
-                            }
+            Err(e) => {
+                if let Some(e) = e.downcast_ref::<IgLiveError>() {
+                    match e {
+                        // 404 segment number does not exist
+                        IgLiveError::StatusNotFound => continue,
+                        // Other download error, skip the segment
+                        _ => {
+                            pb.println(format!("Download failed: {e:?}"));
+                            continue 'outer;
                         }
                     }
                 }
